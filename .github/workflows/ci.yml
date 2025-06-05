@@ -22,36 +22,43 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11" # Specify a Python version, 3.x is okay but specific is better
+          python-version: "3.11" # Or your preferred Python version
 
       - name: Install uv
-        uses: astral-sh/setup-uv-action@v1 # Installs uv
+        run: python -m pip install uv # Installs the latest stable version of uv
+        # For more reproducibility, you can pin the version, e.g.:
+        # run: python -m pip install uv==0.2.3 # Replace with a specific recent version
 
       # Cache for uv downloaded packages
-      # This helps speed up subsequent builds by caching downloaded wheels/sdists
+      - name: Get uv cache directory
+        id: get-uv-cache-dir # Step ID to reference its output
+        run: echo "dir=$(uv cache dir)" >> $GITHUB_OUTPUT
+
       - name: Cache uv global packages
         uses: actions/cache@v4
         with:
-          path: ${{ steps.setup-uv.outputs.uv-cache-path }} # Get cache path from setup-uv action
-          key: ${{ runner.os }}-uv-${{ hashFiles('**/pyproject.toml', '**/uv.lock') }} # Cache key based on OS, pyproject.toml and uv.lock
+          path: ${{ steps.get-uv-cache-dir.outputs.dir }}
+          key: ${{ runner.os }}-uv-${{ hashFiles('**/pyproject.toml', '**/uv.lock') }} # Add uv.lock if you use it
           restore-keys: |
             ${{ runner.os }}-uv-
-        id: cache-uv # Give an id to reference the setup-uv action outputs
 
-      # Cache for MkDocs build artifacts (this is for MkDocs' own .cache directory)
+      # Cache for MkDocs build artifacts
       - name: Create cache ID for MkDocs
-        run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV # Weekly cache busting
+        run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
 
       - name: Cache MkDocs build artifacts
         uses: actions/cache@v4
         with:
           key: mkdocs-material-${{ env.cache_id }}
-          path: .cache # Path where MkDocs stores its cache
+          path: .cache # Default MkDocs cache directory with mkdocs-material
           restore-keys: |
             mkdocs-material-
 
       - name: Install dependencies from pyproject.toml using uv
-        run: uv pip install . # This will read pyproject.toml and install dependencies
+        # The --system flag installs into the Python environment set up by actions/setup-python
+        run: uv pip install --system .
+        # If you generate a lock file (e.g., uv.lock):
+        # run: uv pip sync --system --locked uv.lock
 
       - name: Build and deploy MkDocs site
         run: mkdocs gh-deploy --force
