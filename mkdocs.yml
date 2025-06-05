@@ -11,7 +11,6 @@ theme:
 
 plugins:
   - search
-  - info
   - macros:
       module_name: source_include
 
