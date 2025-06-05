@@ -1,0 +1,41 @@
+site_name: WebThing
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - content.footnote.tooltips
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+
+plugins:
+  - search
+  - info
+  - macros:
+      module_name: source_include
+
+markdown_extensions:
+  # - pymdownx.superfences
+  - tables
+  - footnotes
+  - admonition
+  - pymdownx.details
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      preserve_tabs: true
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+nav:
+  - Home: index.md
+  - Training Cookbook: training_cookbook.md
