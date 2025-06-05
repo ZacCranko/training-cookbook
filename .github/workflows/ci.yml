@@ -61,4 +61,4 @@ jobs:
         # run: uv pip sync --system --locked uv.lock
 
       - name: Build and deploy MkDocs site
-        run: mkdocs gh-deploy --force
+        run: mkdocs build --verbose --strict
