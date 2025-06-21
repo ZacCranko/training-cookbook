@@ -118,13 +118,10 @@ def get_param_state(config: Config) -> dot_dict:
 
 # tag: model-apply
 def model_apply(config: Config, params: dot_dict, tokens: jax.Array) -> jax.Array:
-    out = tokens
-    del tokens
     lin_einsum = ft.partial(jnp.einsum, out_sharding=config.act_seq)
-
-    out =
-    out = lin_einsum("bs,sd->bsd", out, params.linear_in.kernel) + params.linear_in.bias
+    out = params.embedding.at[tokens].get(out_sharding=config.act_seq)
     out += params.pos_embed
+    del tokens
 
     for layer in range(config.num_layers):
         block = params.layers[layer]
