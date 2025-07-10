@@ -89,16 +89,22 @@ def get_param_state(config: Config) -> dot_dict:
     dtype = config.dtype
 
     params = dot_dict(
-        pos_embed=zero_init(next(key), (config.seq_length, config.embed_dim), dtype, config.pos_embed),
+        pos_embed=zero_init(
+            next(key), (config.seq_length, config.embed_dim), dtype, config.pos_embed
+        ),
         layers=dot_dict(),
     )
-    params.embedding = he_init(next(key), (config.vocab_size, config.embed_dim), dtype, config.embed)
+    params.embedding = he_init(
+        next(key), (config.vocab_size, config.embed_dim), dtype, config.embed
+    )
     params.linear_in = dot_dict(
         kernel=he_init(next(key), (1, config.embed_dim), dtype, config.in_kernel),
         bias=zero_init(next(key), (config.embed_dim,), dtype, config.in_bias),
     )
     params.linear_out = dot_dict(
-        kernel=he_init(next(key), (config.embed_dim, config.vocab_size), dtype, config.out_kernel),
+        kernel=he_init(
+            next(key), (config.embed_dim, config.vocab_size), dtype, config.out_kernel
+        ),
     )
     for layer in range(config.num_layers):
         qkv_shape = (3, config.embed_dim, config.num_heads, config.head_dim)
@@ -109,8 +115,12 @@ def get_param_state(config: Config) -> dot_dict:
                 out=he_init(next(key), out_shape, dtype, config.att_out),
             ),
             mlp=dot_dict(
-                in_kernel=he_init(next(key), (config.embed_dim, config.mlp_dim), dtype, config.mlp_in),
-                out_kernel=he_init(next(key), (config.mlp_dim, config.embed_dim), dtype, config.mlp_out),
+                in_kernel=he_init(
+                    next(key), (config.embed_dim, config.mlp_dim), dtype, config.mlp_in
+                ),
+                out_kernel=he_init(
+                    next(key), (config.mlp_dim, config.embed_dim), dtype, config.mlp_out
+                ),
             ),
         )
     return params  # tag: get-param-state
@@ -118,7 +128,6 @@ def get_param_state(config: Config) -> dot_dict:
 
 # tag: model-apply
 def model_apply(config: Config, params: dot_dict, tokens: jax.Array) -> jax.Array:
-    lin_einsum = ft.partial(jnp.einsum, out_sharding=config.act_seq)
     out = params.embedding.at[tokens].get(out_sharding=config.act_seq)
     out += params.pos_embed
     del tokens
@@ -126,48 +135,66 @@ def model_apply(config: Config, params: dot_dict, tokens: jax.Array) -> jax.Arra
     for layer in range(config.num_layers):
         block = params.layers[layer]
         att_skip = out  # 1 billion dollars in venture capital funding please
-        qkv = jnp.einsum("bsd,3dkh->bs3kh", out, block.attention.qkv, out_sharding=config.act_att)
-        out = jax.nn.dot_product_attention(qkv[:, :, 0, :], qkv[:, :, 1, :], qkv[:, :, 2, :], is_causal=True)
-        out = lin_einsum("bskh,khd->bsd", out, block.attention.out)
+        qkv = jnp.einsum(
+            "bsd,3dkh->bs3kh", out, block.attention.qkv, out_sharding=config.act_att
+        )
+        out = jax.nn.dot_product_attention(
+            qkv[:, :, 0, :], qkv[:, :, 1, :], qkv[:, :, 2, :], is_causal=True
+        )
+        out = jnp.einsum(
+            "bskh,khd->bsd", out, block.attention.out, out_sharding=config.act_seq
+        )
         out += att_skip
         out *= jax.lax.rsqrt(jnp.linalg.norm(out, axis=-1, keepdims=True) + 1e-6)
 
         mlp_skip = out  # machine learning circa 1986
-        out = jnp.einsum("bsd,dh->bsh", out, block.mlp.in_kernel, out_sharding=config.act_hidden)
+        out = jnp.einsum(
+            "bsd,dh->bsh", out, block.mlp.in_kernel, out_sharding=config.act_hidden
+        )
         out = jax.nn.gelu(out)
-        out = lin_einsum("bsh,hd->bsd", out, block.mlp.out_kernel)
+        out = jnp.einsum(
+            "bsh,hd->bsd", out, block.mlp.out_kernel, out_sharding=config.act_seq
+        )
         out += mlp_skip
         out *= jax.lax.rsqrt(jnp.linalg.norm(out, axis=-1, keepdims=True) + 1e-6)
 
-    logits = lin_einsum("bsd,dl->bsl", out, params.linear_out.kernel)
+    logits = jnp.einsum(
+        "bsd,dl->bsl", out, params.linear_out.kernel, out_sharding=config.act_seq
+    )
     return logits  # tag: model-apply
 
 
 # tag: get-adam-state
 def get_adam_state(param: jax.Array) -> dot_dict:
-    adam_state = dot_dict(mu=jnp.zeros_like(param), nu=jnp.zeros_like(param), count=jnp.array(0))
+    adam_state = dot_dict(
+        mu=jnp.zeros_like(param), nu=jnp.zeros_like(param), count=jnp.array(0)
+    )
     return adam_state  # tag: get-adam-state
 
 
 # tag: adam-apply
-def adam_apply(config: Config, param: jax.Array, grad: jax.Array, adam_state: dot_dict):
-    def update_moment(grad, moment, decay, order):
-        return (1 - decay) * (grad**order) + decay * moment
+def adam_update(
+    config: Config, param: jax.Array, grad: jax.Array, adam_state: dot_dict
+):
+    adam_state.mu[...] = (1 - config.beta_1) * adam_state.mu[...] + config.beta_1 * grad
+    adam_state.nu[...] = (1 - config.beta_2) * adam_state.nu[
+        ...
+    ] + config.beta_2 * grad**2
+    adam_state.count[...] += 1
 
-    def bias_correction(moment, decay, count):
-        return moment / (1 - decay**count).astype(moment.dtype)
-
-    adam_state.mu[...] = update_moment(grad, adam_state.mu[...], config.beta_1, 1)
-    adam_state.nu[...] = update_moment(grad, adam_state.nu[...], config.beta_2, 2)
-    adam_state.count[...] = adam_state.count[...] + 1
-
-    mu_hat = bias_correction(adam_state.mu[...], config.beta_1, adam_state.count[...])
-    nu_hat = bias_correction(adam_state.nu[...], config.beta_2, adam_state.count[...])
-    update = mu_hat / (jnp.sqrt(nu_hat + config.eps_root) + config.eps)
-    param[...] = param[...] - config.learning_rate * update  # tag: adam-apply
+    mu_hat = adam_state.mu[...] / (1 - config.beta_1 ** adam_state.count[...])
+    nu_hat = adam_state.nu[...] / (1 - config.beta_2 ** adam_state.count[...])
+    param[...] -= (
+        config.learning_rate
+        * mu_hat
+        / (jnp.sqrt(nu_hat + config.eps_root) + config.eps)
+    )
+    # tag: adam-apply
 
 
 # tag: get-train-state
+
+
 @jax.jit
 def get_train_state(config: Config) -> dot_dict:
     train_state = dot_dict()
@@ -184,9 +211,11 @@ def train_step(config: Config, train_state: dot_dict, batch: dict) -> dict:
         labels = jax.nn.one_hot(batch["target_ids"], config.vocab_size)
         return -(labels * jax.nn.log_softmax(logits)).mean()
 
-    params = jax.tree.map(op.methodcaller("__getitem__", slice(None, None, None)), train_state.params)
+    params = jax.tree.map(op.methodcaller("get"), train_state.params)
     loss, grad = jax.value_and_grad(loss_fn)(params)
-    jax.tree.map(ft.partial(adam_apply, config), train_state.params, grad, train_state.opt)
+    jax.tree.map(
+        ft.partial(adam_update, config), train_state.params, grad, train_state.opt
+    )
     metrics = {"train_loss": loss}
     return metrics  # tag: train-step
 
@@ -210,8 +239,12 @@ def get_dataset(config: Config, single_batch=ode) -> Iterator[dict[str, np.ndarr
         target_array = np.roll(observed_array, -1)
         time.sleep(0.5)
         yield {  # repeat the sequence across the batch size to simulate multiple data points
-            "observed_ids": np.tile(observed_array[: config.seq_length], (config.host_batch_size, 1)),
-            "target_ids": np.tile(target_array[: config.seq_length], (config.host_batch_size, 1)),
+            "observed_ids": np.tile(
+                observed_array[: config.seq_length], (config.host_batch_size, 1)
+            ),
+            "target_ids": np.tile(
+                target_array[: config.seq_length], (config.host_batch_size, 1)
+            ),
         }
         # tag: get-dataset
 
@@ -220,14 +253,16 @@ def get_dataset(config: Config, single_batch=ode) -> Iterator[dict[str, np.ndarr
 def get_dataset_on_device(config: Config) -> Iterator[dict[str, jax.Array]]:
     datset = get_dataset(config)
     sharding = PartitionSpec(config.mesh_axis_names)
-    return map(ft.partial(jax.make_array_from_process_local_data, sharding), datset)  # type: ignore
+    return map(ft.partial(jax.make_array_from_process_local_data, sharding), datset)
     # tag: get-dataset-on-device
 
 
 # tag: train-loop
 def train_loop(config: Config):
     mesh = jax.make_mesh(
-        config.mesh_shape, config.mesh_axis_names, axis_types=(jax.sharding.AxisType.Explicit,)
+        config.mesh_shape,
+        config.mesh_axis_names,
+        axis_types=(jax.sharding.AxisType.Explicit,),
     )
     jax.sharding.set_mesh(mesh)
 
@@ -238,9 +273,8 @@ def train_loop(config: Config):
     for step in range(config.num_train_steps):
         metrics = train_step(config, train_state, next(batch))
         record_writer({"step": step} | metrics)
+    # tag: train-loop
 
-
-# tag: train-loop
 
 if __name__ == "__main__":
     jax.config.update("jax_platform_name", "cpu")
