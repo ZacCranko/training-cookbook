@@ -1,25 +1,22 @@
 # Training Cookbook
-
-Traditionally, machine learning codebases rely on libraries to perform much of the bookkeeping and parameter wrangling necessary for training large, complex models. While often convenient, these libraries abstract the key functionality and core API's offered in JAX.  The purpose of this guide therefore is to demonstrate the best practices (or "recipes" if you will) for writing simple, yet high performance machine learning training code in JAX. We believe following the patterns, documented below, will set your machine learning training workloads up to be maximally leverage our compiler (XLA) for performance and tractability. 
+Traditionally, machine learning codebases rely on libraries to perform much of the bookkeeping and parameter wrangling necessary for training large, complex models. While convenient, these libraries can abstract the key functionality and core APIs offered in JAX. The purpose of this cookbook, therefore, is to demonstrate best practices (or "recipes") for writing simple yet high-performance machine learning training code directly in JAX. Following the patterns documented below will prepare your machine learning workloads to maximally leverage our compiler (XLA) for performance and tractability.
 
 Most training scripts adhere roughly to the following structure:
 ```python
 {{ tagged_block('training_cookbook.py', 'train-loop') }}
 ```
-For each line of code above, we will explain the best practices and showcase the core technologies we have assembled to empower you to write simple, yet unbelievably performant code in JAX. The code above is a segment of a self-contained, [completely functional training example](<make link go here>) in which we initialize a [Vaswani et al. (2017)](https://arxiv.org/abs/1706.03762) Transformer decoder and define the training loss for next-token prediction in pure JAX. The code therein is suited to TPUs, CPUs, and GPUs, as well as single- and multi-host systems. For that reason, we use the terms *device* or *accelerator* to refer interchangeably to the hardware JAX is primarily performing arithmetic on—whether it be a TPU, GPU, or CPU—and *host system* to refer to operations performed exclusively using the host CPU.
-
-[^8]:
+For each line of code above, we will explain the best practices and showcase the core technologies we have assembled to empower you to write simple, yet unbelievably performant code in JAX. The code above is a segment of a self-contained, [completely functional companion script](https://github.com/ZacCranko/training-cookbook/blob/main/training_cookbook.py) in which we initialize a [Vaswani et al. (2017)](https://arxiv.org/abs/1706.03762) Transformer decoder and define the training loss for next-token prediction in pure JAX. The code therein is suited to TPUs, CPUs, and GPUs, as well as single- and multi-host systems. For that reason, we use the terms *device* or *accelerator* to refer interchangeably to the hardware JAX is primarily performing arithmetic on—whether it be a TPU, GPU, or CPU—and *host system* to refer to operations performed exclusively using the host CPU.
 
 In this guide, there are many aspects of the JAX APIs we will gloss over for the sake of expediency. These are available for you to peruse at your leisure in our API documentation. However, there is a central JAX concept that one must confront in detail for much of what follows to cohere.
 
 ### Device Mesh and Shardings
-The [*Single Program, Multiple Data* (SPMD)](https://en.wikipedia.org/wiki/Single_program,_multiple_data) model of parallelism employed by JAX means that we write a single program that is partitioned across multiple devices via annotations that communicate which part of the data each device is responsible for. The two concepts in JAX we use to accomplish this are the `Mesh` and `PartitionSpec`.
+JAX employs the [*Single Program, Multiple Data* (SPMD)](https://en.wikipedia.org/wiki/Single_program,_multiple_data) model of parallelism. This means we write a single program that runs on multiple devices, using annotations to specify which part of the data each device is responsible for. The two primary concepts for this are the `Mesh` and the `PartitionSpec`.
 
 #### Device Mesh
-A `jax.sharding.Mesh` is an arrangement of all our accelerators into a NumPy `ndarray`, together with string labels for the axes of the device array. The reason for using an array is that this allows for a very convenient annotation for how arrays should be partitioned across devices. For this introduction, we will use the notation of an ordered dictionary[^7], so that `{"x": 2, "y": 4}` refers to a device mesh of shape `(2, 4)` with labeled axes `"x"` and `"y"`. To shard an array `param`, we decorate it with a `PartitionSpec`, which is a tuple of `str | None` elements of the same length as the dimensions of the array. The `PartitionSpec` specifies which axes of our array are to be sharded over which axes of devices. A more thorough account of the notation of shardings and sharded computations is available in our [sharding tutorial](https://docs.jax.dev/en/latest/sharded-computation.html). Some common sharding strategies such as data parallel, fully sharded data parallel, and basic tensor parallelism will be covered in [Achieving High Performance](#achieving-high-performance).
+A `jax.sharding.Mesh` is an arrangement of all our accelerators into a NumPy `ndarray`, together with string labels for the axes of the device array. The reason for using an array is that this allows for a very convenient annotation for how arrays should be partitioned across devices. For this introduction, we will use the notation of an ordered dictionary[^1], so that `{"x": 2, "y": 4}` refers to a device mesh of shape `(2, 4)` with labeled axes `"x"` and `"y"`. To shard an array `param`, we decorate it with a `PartitionSpec`, which is a tuple of `str | None` elements of the same length as the dimensions of the array. The `PartitionSpec` specifies which axes of our array are to be sharded over which axes of devices. A more thorough account of the notation of shardings and sharded computations is available in our [sharding tutorial](https://docs.jax.dev/en/latest/sharded-computation.html). Some common sharding strategies such as data parallel, fully sharded data parallel, and basic tensor parallelism will be covered in [Achieving High Performance](#achieving-high-performance).
 
 !!! example
-    Suppose we have a device mesh of `{"x": 2, "y": 4}` and an array `param` of shape `(32, 64, 64, 128)`. If we shard the array with `PartitionSpec(None, "x", "y", None, None)`, we end up with shards of size `(32, 32, 16, 128)` placed along the devices. Here, `None` is our way of signaling that an axis should not be sharded. Additionally, we implicitly broadcast the trailing axes of the `PartitionSpec` with `None`, so that an identical sharding can be achieved with `PartitionSpec(None, "x", "y")`. A convenient shorthand for a fully replicated parameter (of any dimension), then, is `PartitionSpec()`.
+    Suppose we have a device mesh of `{"x": 2, "y": 4}` and an array `param` of shape `(32, 64, 64, 128)`. If we shard this array with `PartitionSpec(None, "x", "y", None, None)`, we end up with shards of size `(32, 32, 16, 128)` distributed across the devices. The `None` indicates that an axis should not be sharded. JAX implicitly broadcasts trailing axes, so an identical sharding can be achieved more concisely with `PartitionSpec(None, "x", "y")`. As a result, the shorthand for a fully replicated array (of any dimension) is `PartitionSpec()`.
 
 !!! example
     More advanced mesh geometries are convenient when aligned with the communication hierarchy of our devices. Host-to-host communication is typically slower than accelerator-to-accelerator communication. Suppose we have two host machines, each with eight attached GPUs. One might arrange the devices into a mesh of `{"host": 2, "gpu": 8}`. Then we can shard a parameter as follows:
@@ -27,8 +24,6 @@ A `jax.sharding.Mesh` is an arrangement of all our accelerators into a NumPy `nd
     param = jnp.zeros((256, 192), device=PartitionSpec("gpu", None))
     ```
     The whole of `param` will be replicated twice, but within each host, it will be spread across the eight locally attached GPUs, with each GPU storing a shard of shape `(32, 192)` in HBM. This is particularly useful for [FSDP sharding](#fully-sharded-data-parallel-fsdp).
-
-[^7]: Of course, all dictionaries are order-preserving in modern Python, so this is somewhat redundant.
 
 ## Train State Initialization
 
@@ -69,9 +64,7 @@ When it comes to setting up the optimizer state, things are a little less straig
 ```python
 {{ tagged_block('training_cookbook.py', 'get-adam-state') }}
 ```
-When we apply this function using `jax.tree.map`, we map over each parameter produced in `train_state.params`, creating another nested dictionary that mirrors the (prefix) structure of `train_state.params`, but where each parameter has been replaced with a leaf of its respective Adam state.
-
-[^2]: This is accomplished by using the `zeros_like` constructor, but we could have specified the sharding manually using the `devices` argument of many of the `jax.numpy` functions.
+When we use `jax.tree.map`, it iterates over the items in `train_state.params`. For each parameter, it creates a corresponding Adam state, resulting in a new nested dictionary that mirrors the structure of `train_state.params`. Each leaf in this new structure contains the optimizer state for the corresponding parameter.
 
 ## The Train Step (Functional Transformations)
 ```python
@@ -105,12 +98,10 @@ Examining the call signature of the function `adam_apply` gives us a hint:
 ```python
 {{ tagged_block('training_cookbook.py', 'adam-apply') }}
 ```
-By ordering the arguments to `adam_apply` with `train_state.params` first,[^4] `jax.tree.map` uses the tree structure of `train_state.params` to perform the map. This means that `train_state.opt` is only flattened down to the leaves of the parameter state. This leaves the optimizer state partially flattened, and we are able to retrieve states relevant to `param` in the body of `adam_apply`.
+Because `train_state.params` is the first argument, `jax.tree.map` uses its tree structure to guide the mapping process.[^3] This means that `train_state.opt` is traversed only as deep as the leaves of `train_state.params`. The optimizer state for each parameter is therefore passed in as a complete subtree, which allows us to easily access all relevant states (like `mu` and `nu`) for a given `param` inside `adam_apply`.
 
 !!! tip
     If we wished to use different optimization algorithms and states on different parameters in our model (or freeze some parameters), we could achieve this by modifying the body of `adam_apply` and replacing `jax.tree.map` with `jax.tree_util.tree_map_with_path`, which allows the operand function to customize its behavior depending on the parameter.
-
-[^4]: We could have achieved the same behavior equivalently by ordering `grad` first.
 
 ## The Training Loop
 ```python {hl_lines="11-13"}
@@ -126,11 +117,9 @@ One of the most important tasks performed by the host system is to fetch data an
 ```
 When this code executes, Python will first query the range iterator, get `step` (with value `0`), then call `next(batch)`, which will take some time to retrieve the batch. Then, `train_step` gets called. So far, nothing out of the ordinary.
 
-What happens next is a little bit interesting. Because `jax.jit`-decorated calls are non-blocking, the call to `train_step` returns immediately without performing any work; internally, it mutates the reference to `train_state` in a specific way. Python sees `train_step` as having successfully executed, then the loop jumps over, advances `step_index`, and another call to `next(batch)` is made.
+What happens next is interesting. Because `jax.jit`-decorated calls are non-blocking, the call to `train_step` returns to the Python interpreter immediately. While the computation is enqueued on the accelerator, no work is actually performed yet. The Python loop continues, advancing the step counter and calling `next(batch)` for the *next* iteration.
 
-Once the second call to `train_step` is made, its inputs are now the mutated reference to `train_state` from the previous JIT call and a fresh batch of data. The runtime is clever and sees that in order to execute the second call to `train_step`, we first need to realize the `train_state` result of step `0` to perform the mutation. And so it fires off the computation for the first step, and, crucially, while this happens, `train_step`, once again, returns immediately, and the loop skips over again. Python now runs ahead until it encounters the `next(batch)` function at step 3, which proceeds to execute in Python, loading data, *while* the first train step is executing (for real this time). And just like that, we can simultaneously load data and perform math on the accelerator, without any traditional multiprocessing.
-
-[^1]: For the purposes of this explanation, you can think of `next(batch)` as just a sleep.
+Once the second call to `train_step` is made, its inputs are now the mutated reference to `train_state` from the previous JIT call and a fresh batch of data. The runtime is clever and sees that in order to execute the second call to `train_step`, we first need to realize the `train_state` result of step `0` to perform the mutation. And so it fires off the computation for the first step, and, crucially, while this happens, `train_step`, once again, returns immediately, and the loop skips over again. Python now runs ahead until it encounters the `next(batch)` function at step 3, which proceeds to execute in Python, loading data, *while* the first train step is executing (for real this time). And just like that, we can simultaneously load data and perform math on the accelerator, without any traditional multiprocessing.[^4]
 
 ```mermaid
 ---
@@ -204,7 +193,7 @@ A common pattern is to want to visualize the schedule alongside the other metric
 {{ tagged_block('training_cookbook.py', 'train-loop', "6:7" )}}
 record_writer({"step": step, "learning_rate": learning_rate(step)} | metrics)
 ```
-This is because we have used `jax.numpy` in our calculations. As soon as `jnp.minimum` is called on `count` and `decay_steps`, our Python `int`, `step`, is promoted to a `jax.Array` and placed on the default device (a host-to-device transfer), and we have thrown away money. Additionally, we also have to request this number be returned to Python for printing; this produces a device-to-host transfer.
+This is because we have used `jax.numpy` in our calculations. When `jnp.minimum` is called, the Python integer `step` is promoted to a `jax.Array` and transferred to the accelerator (a host-to-device transfer). The calculation is now enqueued on the accelerator, outside our main `train_step`. To `print` the result, the value must be transferred back to the host (a device-to-host transfer). This round-trip forces the accelerator to synchronize with the host, and we have thrown away money by creating a performance bubble.
 
 The two ways to avoid this are to use NumPy for these calculations or to use the `jax.default_device` context manager.
 ```python
@@ -306,4 +295,8 @@ act_att = PartitionSpec("fsdp", None, "tensor", None)
 act_hidden = PartitionSpec("fsdp", None, "tensor")
 ```
 
-## Multihost training
+---
+[^1]: Of course, all dictionaries are order-preserving in modern Python, so this is somewhat redundant.
+[^2]: This is accomplished by using the `zeros_like` constructor, but we could have specified the sharding manually using the `devices` argument of many of the `jax.numpy` functions.
+[^3]: We could have achieved the same behavior equivalently by ordering `grad` first.
+[^4]: For the purposes of this explanation, you can think of `next(batch)` as just a sleep.
