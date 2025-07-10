@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax._src.core import mutable_array
-from jax.sharding import, AxisType
+from jax.sharding import AxisType
 
 ode = (
   "We are the music makers,\n"
