@@ -10,18 +10,18 @@ For each line of code above, we will explain the best practices and showcase the
 In this guide, there are many aspects of the JAX APIs we will gloss over for the sake of expediency. These are available for you to peruse at your leisure in our API documentation. However, there is a central JAX concept that one must confront in detail for much of what follows to cohere.
 
 ### Device Mesh and Shardings
-JAX employs the [*Single Program, Multiple Data* (SPMD)](https://en.wikipedia.org/wiki/Single_program,_multiple_data) model of parallelism. This means we write a single program that runs on multiple devices, using annotations to specify which part of the data each device is responsible for. The two primary concepts for this are the `Mesh` and the `PartitionSpec`.
+JAX employs the [*Single Program, Multiple Data* (SPMD)](https://en.wikipedia.org/wiki/Single_program,_multiple_data) model of parallelism. This means we write a single program that runs on multiple devices, using annotations to specify which part of the data each device is responsible for. The two primary concepts for this are the `Mesh` and the `jax.P`.
 
 #### Device Mesh
-A `jax.sharding.Mesh` is an arrangement of all our accelerators into a NumPy `ndarray`, together with string labels for the axes of the device array. The reason for using an array is that this allows for a very convenient annotation for how arrays should be partitioned across devices. For this introduction, we will use the notation of an ordered dictionary[^1], so that `{"x": 2, "y": 4}` refers to a device mesh of shape `(2, 4)` with labeled axes `"x"` and `"y"`. To shard an array `param`, we decorate it with a `PartitionSpec`, which is a tuple of `str | None` elements of the same length as the dimensions of the array. The `PartitionSpec` specifies which axes of our array are to be sharded over which axes of devices. A more thorough account of the notation of shardings and sharded computations is available in our [sharding tutorial](https://docs.jax.dev/en/latest/sharded-computation.html). Some common sharding strategies such as data parallel, fully sharded data parallel, and basic tensor parallelism will be covered in [Achieving High Performance](#achieving-high-performance).
+A `jax.sharding.Mesh` is an arrangement of all our accelerators into a NumPy `ndarray`, together with string labels for the axes of the device array. The reason for using an array is that this allows for a very convenient annotation for how arrays should be partitioned across devices. For this introduction, we will use the notation of an ordered dictionary[^1], so that `{"x": 2, "y": 4}` refers to a device mesh of shape `(2, 4)` with labeled axes `"x"` and `"y"`. To shard an array `param`, we decorate it with a `jax.P`, which is a tuple of `str | None` elements of the same length as the dimensions of the array. The `jax.P` specifies which axes of our array are to be sharded over which axes of devices. A more thorough account of the notation of shardings and sharded computations is available in our [sharding tutorial](https://docs.jax.dev/en/latest/sharded-computation.html). Some common sharding strategies such as data parallel, fully sharded data parallel, and basic tensor parallelism will be covered in [Achieving High Performance](#achieving-high-performance).
 
 !!! example
-    Suppose we have a device mesh of `{"x": 2, "y": 4}` and an array `param` of shape `(32, 64, 64, 128)`. If we shard this array with `PartitionSpec(None, "x", "y", None, None)`, we end up with shards of size `(32, 32, 16, 128)` distributed across the devices. The `None` indicates that an axis should not be sharded. JAX implicitly broadcasts trailing axes, so an identical sharding can be achieved more concisely with `PartitionSpec(None, "x", "y")`. As a result, the shorthand for a fully replicated array (of any dimension) is `PartitionSpec()`.
+    Suppose we have a device mesh of `{"x": 2, "y": 4}` and an array `param` of shape `(32, 64, 64, 128)`. If we shard this array with `jax.P(None, "x", "y", None, None)`, we end up with shards of size `(32, 32, 16, 128)` distributed across the devices. The `None` indicates that an axis should not be sharded. JAX implicitly broadcasts trailing axes, so an identical sharding can be achieved more concisely with `jax.P(None, "x", "y")`. As a result, the shorthand for a fully replicated array (of any dimension) is `jax.P()`.
 
 !!! example
     More advanced mesh geometries are convenient when aligned with the communication hierarchy of our devices. Host-to-host communication is typically slower than accelerator-to-accelerator communication. Suppose we have two host machines, each with eight attached GPUs. One might arrange the devices into a mesh of `{"host": 2, "gpu": 8}`. Then we can shard a parameter as follows:
     ```python
-    param = jnp.zeros((256, 192), device=PartitionSpec("gpu", None))
+    param = jnp.zeros((256, 192), device=jax.P("gpu", None))
     ```
     The whole of `param` will be replicated twice, but within each host, it will be spread across the eight locally attached GPUs, with each GPU storing a shard of shape `(32, 192)` in HBM. This is particularly useful for [FSDP sharding](#fully-sharded-data-parallel-fsdp).
 
@@ -221,22 +221,22 @@ Data parallel is the most common and easy-to-understand form of parallelism. In 
 mesh = jax.sharding.Mesh(jax.devices(), ('devices',))
 ```
 ```python {title="Parameter Shardings"}
-pos_embed = PartitionSpec(None, None)
-att_qkv = PartitionSpec(None, None, None, None)
-att_out = PartitionSpec(None, None, None)
-mlp_in = PartitionSpec(None, None)
-mlp_out = PartitionSpec(None, None)
-in_kernel = PartitionSpec(None, None)
-in_bias = PartitionSpec(None)
-out_kernel = PartitionSpec(None, None)
-out_bias = PartitionSpec(None)
+pos_embed = jax.P(None, None/
+att_qkv = jax.P(None, None, None, None)
+att_out = jax.P(None, None, None)
+mlp_in = jax.P(None, None)
+mlp_out = jax.P(None, None)
+in_kernel = jax.P(None, None)
+in_bias = jax.P(None)
+out_kernel = jax.P(None, None)
+out_bias = jax.P(None)
 ```
 ```python {title="Activation Shardings"}
-act_ids = PartitionSpec("devices")
-act_seq = PartitionSpec("devices", None, None)
-act_att = PartitionSpec("devices", None, None, None)
-act_hidden = PartitionSpec("devices", None, None)
-```
+act_ids = jax.P("devices")
+act_seq = jax.P("devices", None, None)
+act_att = jax.P("devices", None, None, None)
+act_hidden = jax.P("devices", None, None)
+``
 
 ### Fully-Sharded Data Parallel (FSDP)
 The drawback of data-parallel sharding is that we have to keep multiple, full, redundant copies of the model parameters in HBM. This is a very performant strategy for small models, but since HBM is in short supply, we need to shard the model parameters as well. In the *Fully-Sharded Data Parallel (FSDP)* strategy, we shard both the model and the parameters.
@@ -247,21 +247,21 @@ Now, as the forward pass happens, the parameters are, one-by-one, unsharded (via
 mesh = jax.sharding.Mesh(jax.devices(), ('fsdp',))
 ```
 ```python {title="Parameter Shardings"}
-pos_embed = PartitionSpec(None, None)
-att_qkv = PartitionSpec(None, "fsdp", None, None)
-att_out = PartitionSpec("fsdp", None, None)
-mlp_in = PartitionSpec("fsdp", None)
-mlp_out = PartitionSpec(None, "fsdp")
-in_kernel = PartitionSpec(None, None)
-in_bias = PartitionSpec(None)
-out_kernel = PartitionSpec("fsdp", None)
-out_bias = PartitionSpec(None)
+pos_embed = jax.P(None, None)
+att_qkv = jax.P(None, "fsdp", None, None)
+att_out = jax.P("fsdp", None, None)
+mlp_in = jax.P("fsdp", None)
+mlp_out = jax.P(None, "fsdp")
+in_kernel = jax.P(None, None)
+in_bias = jax.P(None)
+out_kernel = jax.P("fsdp", None)
+out_bias = jax.P(None)
 ```
 ```python {title="Activation Shardings"}
-act_ids = PartitionSpec("fsdp")
-act_seq = PartitionSpec("fsdp", None, None)
-act_att = PartitionSpec("fsdp", None, None, None)
-act_hidden = PartitionSpec("fsdp", None, None)
+act_ids = jax.P("fsdp")
+act_seq = jax.P("fsdp", None, None)
+act_att = jax.P("fsdp", None, None, None)
+act_hidden = jax.P("fsdp", None, None)
 ```
 
 !!! note
@@ -278,21 +278,21 @@ With multi-head self-attention, we opt to shard along the heads with a replicate
 mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(128, 4), ("fsdp", "tensor"))
 ```
 ```python {title="Parameter Shardings"}
-pos_embed = PartitionSpec(None, "tensor")
-att_qkv = PartitionSpec(None, "fsdp", "tensor", None)
-att_out = PartitionSpec("fsdp", None, None)
-mlp_in = PartitionSpec("fsdp", "tensor")
-mlp_out = PartitionSpec("tensor", "fsdp")
-in_kernel = PartitionSpec(None, None)
-in_bias = PartitionSpec(None)
-out_kernel = PartitionSpec("fsdp", None)
-out_bias = PartitionSpec(None)
+pos_embed = jax.P(None, "tensor")
+att_qkv = jax.P(None, "fsdp", "tensor", None)
+att_out = jax.P("fsdp", None, None)
+mlp_in = jax.P("fsdp", "tensor")
+mlp_out = jax.P("tensor", "fsdp")
+in_kernel = jax.P(None, None)
+in_bias = jax.P(None)
+out_kernel = jax.P("fsdp", None)
+out_bias = jax.P(None)
 ```
 ```python {title="Activation Shardings"}
-act_ids = PartitionSpec("fsdp")
-act_seq = PartitionSpec("fsdp", None, None)
-act_att = PartitionSpec("fsdp", None, "tensor", None)
-act_hidden = PartitionSpec("fsdp", None, "tensor")
+act_ids = jax.P("fsdp")
+act_seq = jax.P("fsdp", None, None)
+act_att = jax.P("fsdp", None, "tensor", None)
+act_hidden = jax.P("fsdp", None, "tensor")
 ```
 
 ---

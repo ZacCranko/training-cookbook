@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax._src.core import mutable_array
-from jax.sharding import PartitionSpec, AxisType
+from jax.sharding import jax.P, AxisType
 
 ode = (
   "We are the music makers,\n"
@@ -48,21 +48,21 @@ class Config:
   dtype: str = "bfloat16"
 
   # tag: sharding
-  embed: PartitionSpec = PartitionSpec(None, None)
-  pos_embed: PartitionSpec = PartitionSpec(None, None)
-  att_qkv: PartitionSpec = PartitionSpec(None, "fsdp", None, None)
-  att_out: PartitionSpec = PartitionSpec("fsdp", None, None)
-  mlp_in: PartitionSpec = PartitionSpec("fsdp", None)
-  mlp_out: PartitionSpec = PartitionSpec(None, "fsdp")
-  in_kernel: PartitionSpec = PartitionSpec(None, None)
-  in_bias: PartitionSpec = PartitionSpec(None)
-  out_kernel: PartitionSpec = PartitionSpec("fsdp", None)
-  out_bias: PartitionSpec = PartitionSpec(None)
+  embed: jax.P = jax.P(None, None)
+  pos_embed: jax.P = jax.P(None, None)
+  att_qkv: jax.P = jax.P(None, "fsdp", None, None)
+  att_out: jax.P = jax.P("fsdp", None, None)
+  mlp_in: jax.P = jax.P("fsdp", None)
+  mlp_out: jax.P = jax.P(None, "fsdp")
+  in_kernel: jax.P = jax.P(None, None)
+  in_bias: jax.P = jax.P(None)
+  out_kernel: jax.P = jax.P("fsdp", None)
+  out_bias: jax.P = jax.P(None)
 
-  act_ids: PartitionSpec = PartitionSpec("fsdp")
-  act_seq: PartitionSpec = PartitionSpec("fsdp", None, None)
-  act_att: PartitionSpec = PartitionSpec("fsdp", None, None, None)
-  act_hidden: PartitionSpec = PartitionSpec("fsdp", None, None)
+  act_ids: jax.P = jax.P("fsdp")
+  act_seq: jax.P = jax.P("fsdp", None, None)
+  act_att: jax.P = jax.P("fsdp", None, None, None)
+  act_hidden: jax.P = jax.P("fsdp", None, None)
   # tag: sharding
 
   def __post_init__(self):
@@ -146,8 +146,8 @@ def model_apply(config: Config, params: dot_dict, tokens: jax.Array) -> jax.Arra
   return logits  # tag: model-apply
 
 
-# tag: get-adam-state
-def get_adam_state(param: jax.Array) -> dot_dict:
+# tag:get-adam-state
+def init_adam_state(param: jax.Array) -> dot_dict:
   adam_state = dot_dict(mu=jnp.zeros_like(param), nu=jnp.zeros_like(param), count=jnp.array(0))
   return adam_state  # tag: get-adam-state
 
@@ -165,13 +165,11 @@ def adam_update(config: Config, param: jax.Array, grad: jax.Array, adam_state: d
 
 
 # tag: get-train-state
-
-
 @jax.jit
-def get_train_state(config: Config) -> dot_dict:
+def init_train_state(config: Config/ -> dot_dict:
   train_state = dot_dict()
   train_state.params = get_param_state(config)
-  train_state.opt = jax.tree.map(get_adam_state, train_state.params)
+  train_state.opt = jax.tree.map(init_adam_state, train_state.params)
   return train_state  # tag: get-train-state
 
 
@@ -218,7 +216,7 @@ def get_dataset(config: Config, single_batch=ode) -> Iterator[dict[str, np.ndarr
 # tag: get-dataset-on-device
 def get_dataset_on_device(config: Config) -> Iterator[dict[str, jax.Array]]:
   datset = get_dataset(config)
-  sharding = PartitionSpec(config.mesh_axis_names)
+  sharding = jax.P(config.mesh_axis_names)
   return map(ft.partial(jax.make_array_from_process_local_data, sharding), datset)
   # tag: get-dataset-on-device
 
@@ -226,7 +224,7 @@ def get_dataset_on_device(config: Config) -> Iterator[dict[str, jax.Array]]:
 # tag: train-loop
 def train_loop(config: Config):
   record_writer = RecordWriter()
-  train_state = get_train_state(config)
+  train_state = init_train_state(config)
   train_state = jax.tree.map(mutable_array, train_state)
   batch = iter(get_dataset_on_device(config))
   for step in range(config.num_train_steps):
