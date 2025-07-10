@@ -85,7 +85,7 @@ class dot_dict(dict):
 
 
 # tag: get-param-state
-def get_param_state(config: Config) -> dot_dict:
+def init_param_state(config: Config) -> dot_dict:
   root_key = jax.random.key(config.param_seed)
   key = map(ft.partial(jax.random.fold_in, root_key), it.count())
   zero_init = jax.nn.initializers.constant(0.0)
@@ -166,9 +166,9 @@ def adam_update(config: Config, param: jax.Array, grad: jax.Array, adam_state: d
 
 # tag: get-train-state
 @jax.jit
-def init_train_state(config: Config/ -> dot_dict:
+def get_train_state(config: Config/ -> dot_dict:
   train_state = dot_dict()
-  train_state.params = get_param_state(config)
+  train_state.params = init_param_state(config)
   train_state.opt = jax.tree.map(init_adam_state, train_state.params)
   return train_state  # tag: get-train-state
 
@@ -224,7 +224,7 @@ def get_dataset_on_device(config: Config) -> Iterator[dict[str, jax.Array]]:
 # tag: train-loop
 def train_loop(config: Config):
   record_writer = RecordWriter()
-  train_state = init_train_state(config)
+  train_state = get_train_state(config)
   train_state = jax.tree.map(mutable_array, train_state)
   batch = iter(get_dataset_on_device(config))
   for step in range(config.num_train_steps):
