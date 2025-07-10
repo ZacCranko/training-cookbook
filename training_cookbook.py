@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax._src.core import mutable_array
-from jax.sharding import PartitionSpec
+from jax.sharding import PartitionSpec, AxisType
 
 ode = (
   "We are the music makers,\n"
@@ -64,6 +64,10 @@ class Config:
   act_att: PartitionSpec = PartitionSpec("fsdp", None, None, None)
   act_hidden: PartitionSpec = PartitionSpec("fsdp", None, None)
   # tag: sharding
+
+  def __post_init__(self):
+    mesh = jax.make_mesh(self.mesh_shape, self.mesh_names, len(self.mesh_shape) * (AxisType.Explicit,))
+    jax.sharding.set_mesh(mesh)
 
 
 @jax.tree_util.register_pytree_with_keys_class
@@ -221,13 +225,6 @@ def get_dataset_on_device(config: Config) -> Iterator[dict[str, jax.Array]]:
 
 # tag: train-loop
 def train_loop(config: Config):
-  mesh = jax.make_mesh(
-    config.mesh_shape,
-    config.mesh_axis_names,
-    axis_types=(jax.sharding.AxisType.Explicit,),
-  )
-  jax.sharding.set_mesh(mesh)
-
   record_writer = RecordWriter()
   train_state = get_train_state(config)
   train_state = jax.tree.map(mutable_array, train_state)

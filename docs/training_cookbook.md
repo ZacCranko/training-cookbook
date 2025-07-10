@@ -1,6 +1,8 @@
 # Training Cookbook
 
-The purpose of this guide is to demonstrate how to write performant machine learning training code in JAX. Most training scripts adhere roughly to the following structure:
+Traditionally, machine learning codebases rely on libraries to perform much of the bookkeeping and parameter wrangling necessary for training large, complex models. While often convenient, these libraries abstract the key functionality and core API's offered in JAX.  The purpose of this guide therefore is to demonstrate the best practices (or "recipes" if you will) for writing simple, yet high performance machine learning training code in JAX. We believe following the patterns, documented below, will set your machine learning training workloads up to be maximally leverage our compiler (XLA) for performance and tractability. 
+
+Most training scripts adhere roughly to the following structure:
 ```python
 {{ tagged_block('training_cookbook.py', 'train-loop') }}
 ```
@@ -8,7 +10,7 @@ For each line of code above, we will explain the best practices and showcase the
 
 [^8]:
 
-In this guide, there are many aspects of the JAX APIs we will gloss over for the sake of expediency. These are available for you to absorb at your leisure in our API documentation. However, there is a central JAX concept that one must confront in detail for much of what follows to cohere.
+In this guide, there are many aspects of the JAX APIs we will gloss over for the sake of expediency. These are available for you to peruse at your leisure in our API documentation. However, there is a central JAX concept that one must confront in detail for much of what follows to cohere.
 
 ### Device Mesh and Shardings
 The [*Single Program, Multiple Data* (SPMD)](https://en.wikipedia.org/wiki/Single_program,_multiple_data) model of parallelism employed by JAX means that we write a single program that is partitioned across multiple devices via annotations that communicate which part of the data each device is responsible for. The two concepts in JAX we use to accomplish this are the `Mesh` and `PartitionSpec`.
@@ -101,8 +103,7 @@ Since we have defined our parameters in terms of a series of nested dictionaries
 ```
 Examining the call signature of the function `adam_apply` gives us a hint:
 ```python
-{{ tagged_block('training_cookbook.py', 'adam-apply', "0") }}
-    ...
+{{ tagged_block('training_cookbook.py', 'adam-apply') }}
 ```
 By ordering the arguments to `adam_apply` with `train_state.params` first,[^4] `jax.tree.map` uses the tree structure of `train_state.params` to perform the map. This means that `train_state.opt` is only flattened down to the leaves of the parameter state. This leaves the optimizer state partially flattened, and we are able to retrieve states relevant to `param` in the body of `adam_apply`.
 
@@ -121,9 +122,9 @@ During training, we have to orchestrate the flow of data between two key players
 ### Efficiency via Asynchronous Dispatch
 One of the most important tasks performed by the host system is to fetch data and place it on the accelerators so that the accelerators are never waiting for data. The time when accelerators are waiting idle between train steps is referred to as the *step bubble*. We can leverage asynchronous dispatch to minimize the step bubble. Let's see how this works with our training loop, discarding, for the moment, the line concerning the `record_writer`.
 ```python
-{{ tagged_block('training_cookbook.py', 'train-loop', "10:12") }}
+{{ tagged_block('training_cookbook.py', 'train-loop', "6:7") }}
 ```
-When this code executes, Python will first query the range iterator, get `step` (with value `0`), then call `next(batch)`[^1], which will take some time to retrieve the batch. Then, `train_step` gets called. So far, nothing out of the ordinary.
+When this code executes, Python will first query the range iterator, get `step` (with value `0`), then call `next(batch)`, which will take some time to retrieve the batch. Then, `train_step` gets called. So far, nothing out of the ordinary.
 
 What happens next is a little bit interesting. Because `jax.jit`-decorated calls are non-blocking, the call to `train_step` returns immediately without performing any work; internally, it mutates the reference to `train_state` in a specific way. Python sees `train_step` as having successfully executed, then the loop jumps over, advances `step_index`, and another call to `next(batch)` is made.
 
@@ -178,8 +179,8 @@ When writing asynchronous dispatch code in Python, there are two primary mistake
 #### Requesting device-to-host transfers
 Up until now, we have ignored what happens to the variable `metrics`. Indeed, if this is left dangling, nothing will happen, and we will achieve good overlap just as advertised. However, more often than not, we would like to observe telemetry from our train step, such as the current loss, gradient statistics, and so on. Suppose we were to insert code such as:
 ```python
-{{ tagged_block('training_cookbook.py', 'train-loop', "10:12") }}
-    print({"step": step} | metrics)
+{{ tagged_block('training_cookbook.py', 'train-loop', "6:7") }}
+print({"step": step} | metrics)
 ```
 Instead of the loop ticking over, `print` will incur a device-to-host transfer of whatever on-device arrays are in `metrics`. This interrupts the Python interpreter, and the code is forced to execute synchronously, producing a step bubble. The solution is slightly counterintuitive: at each step, we gather the telemetry for the *previous* step.
 ```python
@@ -187,7 +188,7 @@ Instead of the loop ticking over, `print` will incur a device-to-host transfer o
 ```
 and
 ```python
-{{ tagged_block('training_cookbook.py', 'train-loop', "10:13") }}
+{{ tagged_block('training_cookbook.py', 'train-loop', "6:7") }}
 ```
 A small helper function like this is essential to achieve good overlap and make the most of the resources of our host system and our accelerator. Of course, the simple `print` statement here can be swapped out for any Python operation that requests data from the accelerator.
 
@@ -200,16 +201,16 @@ def learning_rate(count, init_value: float = 1e-4, decay_steps: int = 10_000, al
 ```
 A common pattern is to want to visualize the schedule alongside the other metrics we're gathering. However, even if we use the clever `record_writer` class we defined earlier, the following code will create a bubble on the accelerator.
 ```python
-{{ tagged_block('training_cookbook.py', 'train-loop', "10:12" )}}
-    record_writer({"step": step, "learning_rate": learning_rate(step)} | metrics)
+{{ tagged_block('training_cookbook.py', 'train-loop', "6:7" )}}
+record_writer({"step": step, "learning_rate": learning_rate(step)} | metrics)
 ```
 This is because we have used `jax.numpy` in our calculations. As soon as `jnp.minimum` is called on `count` and `decay_steps`, our Python `int`, `step`, is promoted to a `jax.Array` and placed on the default device (a host-to-device transfer), and we have thrown away money. Additionally, we also have to request this number be returned to Python for printing; this produces a device-to-host transfer.
 
 The two ways to avoid this are to use NumPy for these calculations or to use the `jax.default_device` context manager.
 ```python
-{{ tagged_block('training_cookbook.py', 'train-loop', "10:12" ) }}
-    with jax.default_device('cpu'):
-        record_writer({"step": step, "learning_rate": learning_rate(step)} | metrics)
+{{ tagged_block('training_cookbook.py', 'train-loop', "6:7" ) }}
+with jax.default_device('cpu'):
+  record_writer({"step": step, "learning_rate": learning_rate(step)} | metrics)
 ```
 
 ### Data Loading
@@ -281,6 +282,8 @@ act_hidden = PartitionSpec("fsdp", None, None)
 
 ### Tensor Parallel
 If our model is large enough and structured appropriately, it becomes beneficial to partition the computation within a single example across our accelerators. Using a matrix multiplication as an example, we can spread the large matrix multiplications over two or four accelerators. This entails significantly more communication, and so this strategy only works for computations with a very high arithmetic intensity, such as extremely large matrix multiplications.
+
+With multi-head self-attention, we opt to shard along the heads with a replicated sequence axis, since this offers the most natural amount of parallelism. If the MLP is large enough we can also efficiently shard the matrix multiplications.
 
 ```python {title="Mesh"}
 mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape(128, 4), ("fsdp", "tensor"))
