@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax._src.core import mutable_array
-from jax.sharding import jax.P, AxisType
+from jax.sharding import, AxisType
 
 ode = (
   "We are the music makers,\n"
@@ -146,7 +146,7 @@ def model_apply(config: Config, params: dot_dict, tokens: jax.Array) -> jax.Arra
   return logits  # tag: model-apply
 
 
-# tag:get-adam-state
+# tag: get-adam-state
 def init_adam_state(param: jax.Array) -> dot_dict:
   adam_state = dot_dict(mu=jnp.zeros_like(param), nu=jnp.zeros_like(param), count=jnp.array(0))
   return adam_state  # tag: get-adam-state
